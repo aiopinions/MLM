@@ -1,0 +1,534 @@
+{
+  "name": "MLM Dashboard API & Analytics",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "dashboard/:user_id",
+        "httpMethod": "GET",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "dashboard-webhook",
+      "name": "Dashboard API Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "mlm-dashboard"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract user ID from URL parameters\nconst userId = $input.first().json.params.user_id;\nconst queryParams = $input.first().json.query || {};\n\n// Basic validation\nif (!userId) {\n  throw new Error('User ID is required');\n}\n\n// Check for UUID format\nconst uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;\nif (!uuidRegex.test(userId)) {\n  throw new Error('Invalid user ID format');\n}\n\nreturn {\n  userId,\n  includePeriod: queryParams.period || 'current_month',\n  includeDownline: queryParams.include_downline === 'true',\n  limit: parseInt(queryParams.limit) || 10\n};"
+      },
+      "id": "process-dashboard-request",
+      "name": "Process Dashboard Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "users"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "id",
+              "condition": "equal",
+              "value": "={{ $json.userId }}"
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-user-profile",
+      "name": "Get User Profile",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "user-exists",
+              "leftValue": "={{ $json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-user-exists",
+      "name": "Check User Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "user_statistics"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "user_id",
+              "condition": "equal",
+              "value": "={{ $('process-dashboard-request').item.json.userId }}"
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-user-statistics",
+      "name": "Get User Statistics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1120, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get current user rank\nSELECT \n  r.name as rank_name,\n  r.color_code,\n  r.icon_url,\n  r.rank_order,\n  ur.achieved_at,\n  ur.qualified_period\nFROM user_ranks ur\nJOIN ranks r ON ur.rank_id = r.id\nWHERE ur.user_id = '{{ $('process-dashboard-request').item.json.userId }}'\n  AND ur.is_current = true\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "get-current-rank",
+      "name": "Get Current Rank",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1120, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get recent commissions\nSELECT \n  c.id,\n  c.commission_amount,\n  c.commission_type,\n  c.level,\n  c.status,\n  c.created_at,\n  p.name as product_name,\n  s.final_amount as sale_amount\nFROM commissions c\nLEFT JOIN sales s ON c.sale_id = s.id\nLEFT JOIN products p ON s.product_id = p.id\nWHERE c.user_id = '{{ $('process-dashboard-request').item.json.userId }}'\nORDER BY c.created_at DESC\nLIMIT {{ $('process-dashboard-request').item.json.limit }};",
+        "options": {}
+      },
+      "id": "get-recent-commissions",
+      "name": "Get Recent Commissions",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1340, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get direct referrals with their status\nSELECT \n  u.id,\n  u.first_name,\n  u.last_name,\n  u.email,\n  u.created_at as joined_date,\n  u.status,\n  COALESCE(us.total_commissions_earned, 0) as total_commissions,\n  COALESCE(us.personal_sales_this_month, 0) as sales_this_month,\n  r.created_at as referral_date\nFROM referrals r\nJOIN users u ON r.referred_id = u.id\nLEFT JOIN user_statistics us ON u.id = us.user_id\nWHERE r.referrer_id = '{{ $('process-dashboard-request').item.json.userId }}'\n  AND r.level = 1\n  AND r.status = 'active'\nORDER BY r.created_at DESC\nLIMIT {{ $('process-dashboard-request').item.json.limit }};",
+        "options": {}
+      },
+      "id": "get-direct-referrals",
+      "name": "Get Direct Referrals",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1340, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get referral link and code\nSELECT \n  code,\n  custom_url,\n  description,\n  current_uses,\n  max_uses,\n  is_active,\n  created_at\nFROM referral_codes\nWHERE user_id = '{{ $('process-dashboard-request').item.json.userId }}'\n  AND is_active = true\nORDER BY created_at DESC\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "get-referral-link",
+      "name": "Get Referral Link",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1560, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get team performance metrics\nWITH team_metrics AS (\n  SELECT \n    COUNT(DISTINCT r.referred_id) as total_team_members,\n    COUNT(DISTINCT CASE WHEN r.level = 1 THEN r.referred_id END) as direct_referrals,\n    COUNT(DISTINCT CASE WHEN r.level > 1 THEN r.referred_id END) as indirect_referrals,\n    COUNT(DISTINCT CASE WHEN r.created_at >= DATE_TRUNC('month', CURRENT_DATE) THEN r.referred_id END) as new_this_month\n  FROM referrals r\n  WHERE r.referrer_id = '{{ $('process-dashboard-request').item.json.userId }}'\n    AND r.status = 'active'\n),\nteam_sales AS (\n  SELECT \n    COALESCE(SUM(s.final_amount), 0) as total_team_sales,\n    COALESCE(SUM(CASE WHEN s.created_at >= DATE_TRUNC('month', CURRENT_DATE) THEN s.final_amount ELSE 0 END), 0) as team_sales_this_month,\n    COUNT(s.id) as total_team_orders\n  FROM referrals r\n  JOIN sales s ON r.referred_id = s.buyer_id\n  WHERE r.referrer_id = '{{ $('process-dashboard-request').item.json.userId }}'\n    AND r.status = 'active'\n    AND s.payment_status = 'completed'\n)\nSELECT \n  tm.*,\n  ts.*\nFROM team_metrics tm\nCROSS JOIN team_sales ts;",
+        "options": {}
+      },
+      "id": "get-team-metrics",
+      "name": "Get Team Metrics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1560, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get commission performance by month (last 6 months)\nSELECT \n  DATE_TRUNC('month', c.created_at) as month,\n  SUM(c.commission_amount) as total_commissions,\n  COUNT(c.id) as commission_count,\n  AVG(c.commission_amount) as avg_commission\nFROM commissions c\nWHERE c.user_id = '{{ $('process-dashboard-request').item.json.userId }}'\n  AND c.created_at >= DATE_TRUNC('month', CURRENT_DATE - INTERVAL '5 months')\n  AND c.status IN ('pending', 'approved', 'paid')\nGROUP BY DATE_TRUNC('month', c.created_at)\nORDER BY month DESC;",
+        "options": {}
+      },
+      "id": "get-commission-trends",
+      "name": "Get Commission Trends",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1780, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "notifications"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "user_id",
+              "condition": "equal",
+              "value": "={{ $('process-dashboard-request').item.json.userId }}"
+            },
+            {
+              "column": "is_read",
+              "condition": "equal",
+              "value": false
+            }
+          ]
+        },
+        "sort": {
+          "values": [
+            {
+              "key": "created_at",
+              "direction": "DESC"
+            }
+          ]
+        },
+        "limit": 10,
+        "options": {}
+      },
+      "id": "get-notifications",
+      "name": "Get Notifications",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1780, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build comprehensive dashboard response\n// Aggregate all the data collected from various endpoints\n\nconst userProfile = $('get-user-profile').first().json[0];\nconst userStats = $('get-user-statistics').first().json[0] || {};\nconst currentRank = $('get-current-rank').first().json[0] || {};\nconst recentCommissions = $('get-recent-commissions').all() || [];\nconst directReferrals = $('get-direct-referrals').all() || [];\nconst referralLink = $('get-referral-link').first().json[0] || {};\nconst teamMetrics = $('get-team-metrics').first().json[0] || {};\nconst commissionTrends = $('get-commission-trends').all() || [];\nconst notifications = $('get-notifications').all() || [];\n\n// Calculate additional metrics\nconst totalEarnings = parseFloat(userStats.total_commissions_earned || 0);\nconst thisMonthEarnings = parseFloat(userStats.commissions_this_month || 0);\nconst lastMonthEarnings = parseFloat(userStats.commissions_last_month || 0);\nconst monthlyGrowth = lastMonthEarnings > 0 ? ((thisMonthEarnings - lastMonthEarnings) / lastMonthEarnings * 100).toFixed(2) : 0;\n\n// Build the response\nconst dashboardData = {\n  user: {\n    id: userProfile.id,\n    username: userProfile.username,\n    email: userProfile.email,\n    first_name: userProfile.first_name,\n    last_name: userProfile.last_name,\n    full_name: `${userProfile.first_name} ${userProfile.last_name}`,\n    status: userProfile.status,\n    verification_status: userProfile.verification_status,\n    member_since: userProfile.created_at,\n    last_login: userProfile.last_login\n  },\n  \n  statistics: {\n    total_earnings: totalEarnings,\n    earnings_this_month: thisMonthEarnings,\n    earnings_last_month: lastMonthEarnings,\n    monthly_growth_percentage: monthlyGrowth,\n    pending_balance: parseFloat(userStats.pending_commission_balance || 0),\n    total_paid: parseFloat(userStats.total_commissions_paid || 0),\n    \n    team: {\n      total_members: parseInt(teamMetrics.total_team_members || 0),\n      direct_referrals: parseInt(teamMetrics.direct_referrals || 0),\n      indirect_referrals: parseInt(teamMetrics.indirect_referrals || 0),\n      new_this_month: parseInt(teamMetrics.new_this_month || 0),\n      total_team_sales: parseFloat(teamMetrics.total_team_sales || 0),\n      team_sales_this_month: parseFloat(teamMetrics.team_sales_this_month || 0),\n      total_team_orders: parseInt(teamMetrics.total_team_orders || 0)\n    },\n    \n    referrals: {\n      total_direct: parseInt(userStats.total_direct_referrals || 0),\n      total_indirect: parseInt(userStats.total_indirect_referrals || 0),\n      total_team_size: parseInt(userStats.total_team_size || 0),\n      active_last_30_days: parseInt(userStats.active_referrals_last_30_days || 0)\n    }\n  },\n  \n  current_rank: {\n    name: currentRank.rank_name || 'Bronze',\n    color_code: currentRank.color_code || '#CD7F32',\n    icon_url: currentRank.icon_url,\n    rank_order: currentRank.rank_order || 1,\n    achieved_at: currentRank.achieved_at,\n    qualified_period: currentRank.qualified_period\n  },\n  \n  referral_link: {\n    code: referralLink.code,\n    url: referralLink.custom_url,\n    description: referralLink.description,\n    uses: parseInt(referralLink.current_uses || 0),\n    max_uses: referralLink.max_uses,\n    is_active: referralLink.is_active\n  },\n  \n  recent_commissions: recentCommissions.map(comm => ({\n    id: comm.id,\n    amount: parseFloat(comm.commission_amount),\n    type: comm.commission_type,\n    level: comm.level,\n    status: comm.status,\n    date: comm.created_at,\n    product_name: comm.product_name,\n    sale_amount: parseFloat(comm.sale_amount || 0)\n  })),\n  \n  direct_referrals: directReferrals.map(ref => ({\n    id: ref.id,\n    name: `${ref.first_name} ${ref.last_name}`,\n    email: ref.email,\n    joined_date: ref.joined_date,\n    status: ref.status,\n    total_commissions: parseFloat(ref.total_commissions || 0),\n    sales_this_month: parseFloat(ref.sales_this_month || 0),\n    referral_date: ref.referral_date\n  })),\n  \n  commission_trends: commissionTrends.map(trend => ({\n    month: trend.month,\n    total_commissions: parseFloat(trend.total_commissions || 0),\n    commission_count: parseInt(trend.commission_count || 0),\n    average_commission: parseFloat(trend.avg_commission || 0)\n  })),\n  \n  notifications: notifications.map(notif => ({\n    id: notif.id,\n    title: notif.title,\n    message: notif.message,\n    type: notif.type,\n    action_url: notif.action_url,\n    created_at: notif.created_at\n  })),\n  \n  generated_at: new Date().toISOString()\n};\n\nreturn dashboardData;"
+      },
+      "id": "build-dashboard-response",
+      "name": "Build Dashboard Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"data\": {{ JSON.stringify($json) }}\n}",
+        "responseHeaders": {
+          "entries": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            },
+            {
+              "name": "Access-Control-Allow-Origin",
+              "value": "*"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "dashboard-success-response",
+      "name": "Dashboard Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2220, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 404,
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"User not found\",\n  \"error\": \"The specified user ID does not exist in the system\"\n}",
+        "responseHeaders": {
+          "entries": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "user-not-found-response",
+      "name": "User Not Found Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [900, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 400,
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Dashboard request failed\",\n  \"error\": \"{{ $json.message || 'Invalid request parameters' }}\"\n}",
+        "responseHeaders": {
+          "entries": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 500]
+    }
+  ],
+  "connections": {
+    "Dashboard API Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process Dashboard Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Dashboard Request": {
+      "main": [
+        [
+          {
+            "node": "Get User Profile",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User Profile": {
+      "main": [
+        [
+          {
+            "node": "Check User Exists",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check User Exists": {
+      "main": [
+        [
+          {
+            "node": "Get User Statistics",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Current Rank",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "User Not Found Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get User Statistics": {
+      "main": [
+        [
+          {
+            "node": "Get Recent Commissions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Current Rank": {
+      "main": [
+        [
+          {
+            "node": "Get Direct Referrals",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Recent Commissions": {
+      "main": [
+        [
+          {
+            "node": "Get Referral Link",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Direct Referrals": {
+      "main": [
+        [
+          {
+            "node": "Get Team Metrics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Referral Link": {
+      "main": [
+        [
+          {
+            "node": "Get Commission Trends",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Team Metrics": {
+      "main": [
+        [
+          {
+            "node": "Get Notifications",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Commission Trends": {
+      "main": [
+        [
+          {
+            "node": "Build Dashboard Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Notifications": {
+      "main": [
+        [
+          {
+            "node": "Build Dashboard Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Dashboard Response": {
+      "main": [
+        [
+          {
+            "node": "Dashboard Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "id": "mlm-core",
+      "name": "MLM Core"
+    },
+    {
+      "id": "dashboard-api",
+      "name": "Dashboard API"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-05T14:46:17.000Z",
+  "versionId": "1"
+}

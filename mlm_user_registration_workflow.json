@@ -1,0 +1,1041 @@
+{
+  "name": "MLM User Registration & Referral Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "register",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-register",
+      "name": "Registration Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "mlm-register"
+    },
+    {
+      "parameters": {
+        "jsCode": "// MLM User Registration Processing\n// Extract and validate registration data\n\nconst data = $input.first().json.body;\n\n// Validate required fields\nconst requiredFields = ['email', 'password', 'firstName', 'lastName'];\nconst missing = requiredFields.filter(field => !data[field]);\n\nif (missing.length > 0) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\n// Validate email format\nconst emailRegex = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/;\nif (!emailRegex.test(data.email)) {\n  throw new Error('Invalid email format');\n}\n\n// Generate username if not provided\nif (!data.username) {\n  data.username = data.email.split('@')[0] + Math.random().toString(36).substr(2, 4);\n}\n\n// Generate verification token\ndata.emailVerificationToken = require('crypto').randomBytes(32).toString('hex');\n\n// Hash password (in production, use bcrypt)\ndata.passwordHash = require('crypto').createHash('sha256').update(data.password).digest('hex');\n\n// Extract referral code if provided\ndata.referralCode = data.referralCode || $input.first().json.query?.ref || null;\n\n// Set registration timestamp\ndata.registrationTime = new Date().toISOString();\n\nreturn { \n  userData: data,\n  hasReferral: !!data.referralCode,\n  referralCode: data.referralCode\n};"
+      },
+      "id": "process-registration",
+      "name": "Process Registration Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-referral",
+              "leftValue": "={{ $json.hasReferral }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-referral",
+      "name": "Check Referral Code",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "referral_codes"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "code",
+              "condition": "equal",
+              "value": "={{ $json.referralCode }}"
+            },
+            {
+              "column": "is_active",
+              "condition": "equal",
+              "value": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "validate-referral-code",
+      "name": "Validate Referral Code",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [900, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "users"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "username": "={{ $('process-registration').item.json.userData.username }}",
+            "email": "={{ $('process-registration').item.json.userData.email }}",
+            "password_hash": "={{ $('process-registration').item.json.userData.passwordHash }}",
+            "first_name": "={{ $('process-registration').item.json.userData.firstName }}",
+            "last_name": "={{ $('process-registration').item.json.userData.lastName }}",
+            "phone": "={{ $('process-registration').item.json.userData.phone || null }}",
+            "country": "={{ $('process-registration').item.json.userData.country || null }}",
+            "state": "={{ $('process-registration').item.json.userData.state || null }}",
+            "city": "={{ $('process-registration').item.json.userData.city || null }}",
+            "email_verification_token": "={{ $('process-registration').item.json.userData.emailVerificationToken }}",
+            "status": "pending"
+          }
+        },
+        "options": {
+          "queryReplacement": "id,username,email,first_name,last_name,created_at"
+        }
+      },
+      "id": "create-user",
+      "name": "Create User",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1120, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "referral-valid",
+              "leftValue": "={{ $('validate-referral-code').item.json.length }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-valid-referral",
+      "name": "Is Referral Valid?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 400]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "referrals"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "referrer_id": "={{ $('validate-referral-code').item.json[0].user_id }}",
+            "referred_id": "={{ $('create-user').item.json.id }}",
+            "referral_code_id": "={{ $('validate-referral-code').item.json[0].id }}",
+            "level": 1,
+            "status": "active",
+            "referral_source": "website"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-referral-relationship",
+      "name": "Create Referral Relationship",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1340, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Create Multi-Level Referral Chain\n// This builds the complete MLM tree structure\n\nconst newUserId = $('create-user').item.json.id;\nconst directReferrerId = $('validate-referral-code').item.json[0].user_id;\n\n// We need to build the complete upline chain\n// Get all upline referrers for the direct referrer\nconst uplineQuery = `\n  WITH RECURSIVE upline AS (\n    -- Start with direct referrer\n    SELECT referrer_id, referred_id, level, 1 as chain_level\n    FROM referrals \n    WHERE referred_id = '${directReferrerId}' AND status = 'active'\n    \n    UNION ALL\n    \n    -- Get each level up the chain\n    SELECT r.referrer_id, r.referred_id, r.level, u.chain_level + 1\n    FROM referrals r\n    INNER JOIN upline u ON r.referred_id = u.referrer_id\n    WHERE r.status = 'active' AND u.chain_level < 10\n  )\n  SELECT referrer_id, chain_level + 1 as new_level \n  FROM upline \n  ORDER BY chain_level\n`;\n\nreturn {\n  newUserId,\n  directReferrerId,\n  uplineQuery,\n  shouldCreateUplineChain: true\n};"
+      },
+      "id": "build-mlm-chain",
+      "name": "Build MLM Chain Logic",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1560, 200]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "={{ $json.uplineQuery }}",
+        "options": {}
+      },
+      "id": "get-upline-referrers",
+      "name": "Get Upline Referrers",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1780, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-upline-referrers",
+      "name": "Loop Upline Referrers",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [2000, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "referrals"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "referrer_id": "={{ $json.referrer_id }}",
+            "referred_id": "={{ $('build-mlm-chain').item.json.newUserId }}",
+            "level": "={{ $json.new_level }}",
+            "status": "active",
+            "referral_source": "indirect"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-upline-referral",
+      "name": "Create Upline Referral",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2220, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "update",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "referral_codes"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "id",
+              "condition": "equal",
+              "value": "={{ $('validate-referral-code').item.json[0].id }}"
+            }
+          ]
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "current_uses": "={{ $('validate-referral-code').item.json[0].current_uses + 1 }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "update-referral-usage",
+      "name": "Update Referral Usage",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2440, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "user_settings"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "receive_email_notifications": true,
+            "receive_marketing_emails": true,
+            "language": "en",
+            "currency": "USD"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-user-settings",
+      "name": "Create User Settings",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1340, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "user_statistics"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "initialize-user-stats",
+      "name": "Initialize User Stats",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1560, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "commission_plans"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "is_active",
+              "condition": "equal",
+              "value": true
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-default-commission-plan",
+      "name": "Get Default Commission Plan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1780, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "user_commission_plans"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "commission_plan_id": "={{ $json[0].id }}",
+            "is_active": true
+          }
+        },
+        "options": {}
+      },
+      "id": "assign-commission-plan",
+      "name": "Assign Commission Plan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2000, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "ranks"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "rank_order",
+              "condition": "equal",
+              "value": 1
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-initial-rank",
+      "name": "Get Initial Rank",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2220, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "user_ranks"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "rank_id": "={{ $json[0].id }}",
+            "is_current": true,
+            "qualified_period": "lifetime"
+          }
+        },
+        "options": {}
+      },
+      "id": "assign-initial-rank",
+      "name": "Assign Initial Rank",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2440, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Generate unique referral code for new user\nconst userId = $('create-user').item.json.id;\nconst username = $('create-user').item.json.username;\n\n// Create a unique referral code\nconst timestamp = Date.now().toString(36);\nconst randomStr = Math.random().toString(36).substring(2, 6).toUpperCase();\nconst referralCode = `${username.substring(0, 4).toUpperCase()}${timestamp.substring(-4)}${randomStr}`;\n\n// Create custom URL\nconst customUrl = `https://yourdomain.com/join/${referralCode}`;\n\nreturn {\n  userId,\n  referralCode,\n  customUrl,\n  description: `Personal referral link for ${username}`\n};"
+      },
+      "id": "generate-referral-code",
+      "name": "Generate Referral Code",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [2660, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "referral_codes"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $json.userId }}",
+            "code": "={{ $json.referralCode }}",
+            "custom_url": "={{ $json.customUrl }}",
+            "description": "={{ $json.description }}",
+            "is_active": true
+          }
+        },
+        "options": {}
+      },
+      "id": "create-referral-code",
+      "name": "Create Referral Code",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2880, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@yourmlmcompany.com",
+        "toEmail": "={{ $('create-user').item.json.email }}",
+        "subject": "Welcome to MLM Company - Verify Your Email",
+        "html": "<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"utf-8\">\n    <title>Welcome to MLM Company</title>\n</head>\n<body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">\n    <div style=\"max-width: 600px; margin: 0 auto; padding: 20px;\">\n        <h2 style=\"color: #2c3e50;\">Welcome to MLM Company!</h2>\n        \n        <p>Hi {{ $('create-user').item.json.first_name }},</p>\n        \n        <p>Thank you for joining MLM Company! We're excited to have you as part of our community.</p>\n        \n        <div style=\"background: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;\">\n            <h3 style=\"margin-top: 0;\">Your Account Details:</h3>\n            <p><strong>Username:</strong> {{ $('create-user').item.json.username }}</p>\n            <p><strong>Email:</strong> {{ $('create-user').item.json.email }}</p>\n            <p><strong>Referral Code:</strong> {{ $('generate-referral-code').item.json.referralCode }}</p>\n            <p><strong>Personal Referral Link:</strong><br>\n            <a href=\"{{ $('generate-referral-code').item.json.customUrl }}\">{{ $('generate-referral-code').item.json.customUrl }}</a></p>\n        </div>\n        \n        <p>To complete your registration, please verify your email address by clicking the button below:</p>\n        \n        <div style=\"text-align: center; margin: 30px 0;\">\n            <a href=\"https://yourdomain.com/verify-email?token={{ $('process-registration').item.json.userData.emailVerificationToken }}\" \n               style=\"background: #3498db; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;\">\n               Verify Email Address\n            </a>\n        </div>\n        \n        <h3>What's Next?</h3>\n        <ul>\n            <li>Complete your profile in your dashboard</li>\n            <li>Share your referral link to start earning commissions</li>\n            <li>Explore our product catalog</li>\n            <li>Join our community forums</li>\n        </ul>\n        \n        <p>If you have any questions, please don't hesitate to contact our support team.</p>\n        \n        <p>Best regards,<br>\n        The MLM Company Team</p>\n        \n        <hr style=\"margin-top: 30px;\">\n        <p style=\"font-size: 12px; color: #666;\">This email was sent because you registered for an account at MLM Company. If you didn't register, please ignore this email.</p>\n    </div>\n</body>\n</html>",
+        "options": {}
+      },
+      "id": "send-welcome-email",
+      "name": "Send Welcome Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [3100, 300],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-mlm",
+          "name": "MLM SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "notifications"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "title": "Welcome to MLM Company!",
+            "message": "Your account has been created successfully. Please check your email to verify your account.",
+            "type": "success",
+            "action_url": "/dashboard"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-welcome-notification",
+      "name": "Create Welcome Notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3320, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "signup-bonus-eligible",
+              "leftValue": "={{ $('get-default-commission-plan').item.json[0].signup_bonus }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-signup-bonus",
+      "name": "Check Signup Bonus",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [3540, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "commissions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "commission_plan_id": "={{ $('get-default-commission-plan').item.json[0].id }}",
+            "commission_type": "signup_bonus",
+            "commission_amount": "={{ $('get-default-commission-plan').item.json[0].signup_bonus }}",
+            "status": "pending",
+            "notes": "Signup bonus for new user registration"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-signup-commission",
+      "name": "Create Signup Commission",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3760, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "activity_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-user').item.json.id }}",
+            "action": "user_registered",
+            "resource_type": "user",
+            "resource_id": "={{ $('create-user').item.json.id }}",
+            "details": "={{ JSON.stringify({ \n  email: $('create-user').item.json.email, \n  username: $('create-user').item.json.username,\n  referral_code: $('process-registration').item.json.referralCode || null,\n  has_referrer: $('process-registration').item.json.hasReferral\n}) }}",
+            "ip_address": "={{ $('Registration Webhook').item.json.headers['x-forwarded-for'] || $('Registration Webhook').item.json.headers['x-real-ip'] || '127.0.0.1' }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-registration-activity",
+      "name": "Log Registration Activity",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3980, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Registration successful! Please check your email to verify your account.\",\n  \"data\": {\n    \"user_id\": \"{{ $('create-user').item.json.id }}\",\n    \"username\": \"{{ $('create-user').item.json.username }}\",\n    \"email\": \"{{ $('create-user').item.json.email }}\",\n    \"referral_code\": \"{{ $('generate-referral-code').item.json.referralCode }}\",\n    \"referral_url\": \"{{ $('generate-referral-code').item.json.customUrl }}\",\n    \"status\": \"pending_verification\",\n    \"created_at\": \"{{ $('create-user').item.json.created_at }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "success-response",
+      "name": "Registration Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [4200, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 400,
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Registration failed\",\n  \"error\": \"{{ $json.message || 'Unknown error occurred' }}\"\n}",
+        "options": {}
+      },
+      "id": "error-response",
+      "name": "Registration Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 500]
+    }
+  ],
+  "connections": {
+    "Registration Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process Registration Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Registration Data": {
+      "main": [
+        [
+          {
+            "node": "Check Referral Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Referral Code": {
+      "main": [
+        [
+          {
+            "node": "Validate Referral Code",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Referral Code": {
+      "main": [
+        [
+          {
+            "node": "Check Valid Referral",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create User": {
+      "main": [
+        [
+          {
+            "node": "Create User Settings",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Generate Referral Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Valid Referral": {
+      "main": [
+        [
+          {
+            "node": "Create Referral Relationship",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create User",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Referral Relationship": {
+      "main": [
+        [
+          {
+            "node": "Build MLM Chain Logic",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build MLM Chain Logic": {
+      "main": [
+        [
+          {
+            "node": "Get Upline Referrers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Upline Referrers": {
+      "main": [
+        [
+          {
+            "node": "Loop Upline Referrers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Upline Referrers": {
+      "main": [
+        [
+          {
+            "node": "Create Upline Referral",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update Referral Usage",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Upline Referral": {
+      "main": [
+        [
+          {
+            "node": "Loop Upline Referrers",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create User Settings": {
+      "main": [
+        [
+          {
+            "node": "Initialize User Stats",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Initialize User Stats": {
+      "main": [
+        [
+          {
+            "node": "Get Default Commission Plan",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Default Commission Plan": {
+      "main": [
+        [
+          {
+            "node": "Assign Commission Plan",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check Signup Bonus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Assign Commission Plan": {
+      "main": [
+        [
+          {
+            "node": "Get Initial Rank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Initial Rank": {
+      "main": [
+        [
+          {
+            "node": "Assign Initial Rank",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Referral Code": {
+      "main": [
+        [
+          {
+            "node": "Create Referral Code",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Referral Code": {
+      "main": [
+        [
+          {
+            "node": "Send Welcome Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Welcome Email": {
+      "main": [
+        [
+          {
+            "node": "Create Welcome Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Welcome Notification": {
+      "main": [
+        [
+          {
+            "node": "Log Registration Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Signup Bonus": {
+      "main": [
+        [
+          {
+            "node": "Create Signup Commission",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Log Registration Activity": {
+      "main": [
+        [
+          {
+            "node": "Registration Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "id": "mlm-core",
+      "name": "MLM Core"
+    },
+    {
+      "id": "user-management",
+      "name": "User Management"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-05T14:46:17.000Z",
+  "versionId": "1"
+}

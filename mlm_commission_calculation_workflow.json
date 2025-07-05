@@ -1,0 +1,920 @@
+{
+  "name": "MLM Commission Calculation & Sales Processing",
+  "nodes": [
+    {
+      "parameters": {
+        "path": "process-sale",
+        "httpMethod": "POST",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "sale-webhook",
+      "name": "Sale Processing Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "mlm-sale-process"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Sales Processing and Validation\n// Extract and validate sale data from Stripe webhook or form submission\n\nconst data = $input.first().json.body;\n\n// Validate required fields\nconst requiredFields = ['buyer_id', 'product_id', 'quantity', 'unit_price', 'final_amount'];\nconst missing = requiredFields.filter(field => !data[field]);\n\nif (missing.length > 0) {\n  throw new Error(`Missing required fields: ${missing.join(', ')}`);\n}\n\n// Calculate totals\nconst quantity = parseInt(data.quantity) || 1;\nconst unitPrice = parseFloat(data.unit_price);\nconst totalAmount = quantity * unitPrice;\nconst discountAmount = parseFloat(data.discount_amount) || 0;\nconst taxAmount = parseFloat(data.tax_amount) || 0;\nconst finalAmount = parseFloat(data.final_amount);\n\n// Validate amounts\nif (finalAmount !== (totalAmount - discountAmount + taxAmount)) {\n  console.warn('Amount calculation mismatch, using provided final_amount');\n}\n\n// Process payment information\nconst paymentStatus = data.payment_status || 'pending';\nconst paymentMethod = data.payment_method || 'unknown';\nconst stripePaymentIntentId = data.stripe_payment_intent_id || null;\nconst paymentTransactionId = data.payment_transaction_id || data.transaction_id || null;\n\nreturn {\n  saleData: {\n    buyer_id: data.buyer_id,\n    product_id: data.product_id,\n    quantity,\n    unit_price: unitPrice,\n    total_amount: totalAmount,\n    discount_amount: discountAmount,\n    tax_amount: taxAmount,\n    final_amount: finalAmount,\n    payment_status: paymentStatus,\n    payment_method: paymentMethod,\n    payment_transaction_id: paymentTransactionId,\n    stripe_payment_intent_id: stripePaymentIntentId,\n    order_notes: data.order_notes || null\n  },\n  shouldProcessCommissions: paymentStatus === 'completed',\n  processedAt: new Date().toISOString()\n};"
+      },
+      "id": "process-sale-data",
+      "name": "Process Sale Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "products"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "id",
+              "condition": "equal",
+              "value": "={{ $json.saleData.product_id }}"
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-product-details",
+      "name": "Get Product Details",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [680, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "commission-eligible",
+              "leftValue": "={{ $json[0].commission_eligible }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-commission-eligible",
+      "name": "Check Commission Eligible",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "sales"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "buyer_id": "={{ $('process-sale-data').item.json.saleData.buyer_id }}",
+            "product_id": "={{ $('process-sale-data').item.json.saleData.product_id }}",
+            "quantity": "={{ $('process-sale-data').item.json.saleData.quantity }}",
+            "unit_price": "={{ $('process-sale-data').item.json.saleData.unit_price }}",
+            "total_amount": "={{ $('process-sale-data').item.json.saleData.total_amount }}",
+            "discount_amount": "={{ $('process-sale-data').item.json.saleData.discount_amount }}",
+            "tax_amount": "={{ $('process-sale-data').item.json.saleData.tax_amount }}",
+            "final_amount": "={{ $('process-sale-data').item.json.saleData.final_amount }}",
+            "payment_status": "={{ $('process-sale-data').item.json.saleData.payment_status }}",
+            "payment_method": "={{ $('process-sale-data').item.json.saleData.payment_method }}",
+            "payment_transaction_id": "={{ $('process-sale-data').item.json.saleData.payment_transaction_id }}",
+            "stripe_payment_intent_id": "={{ $('process-sale-data').item.json.saleData.stripe_payment_intent_id }}",
+            "order_notes": "={{ $('process-sale-data').item.json.saleData.order_notes }}"
+          }
+        },
+        "options": {
+          "queryReplacement": "id,buyer_id,product_id,final_amount,payment_status,created_at"
+        }
+      },
+      "id": "create-sale-record",
+      "name": "Create Sale Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1120, 300],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "payment-completed",
+              "leftValue": "={{ $('process-sale-data').item.json.shouldProcessCommissions }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-payment-status",
+      "name": "Check Payment Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get complete upline chain for commission calculation\nWITH RECURSIVE upline_chain AS (\n  -- Start with the buyer's direct referrer\n  SELECT \n    r.referrer_id,\n    r.referred_id,\n    r.level,\n    1 as chain_level,\n    u.first_name,\n    u.last_name,\n    u.email\n  FROM referrals r\n  JOIN users u ON r.referrer_id = u.id\n  WHERE r.referred_id = '{{ $('create-sale-record').item.json.buyer_id }}' \n    AND r.status = 'active'\n  \n  UNION ALL\n  \n  -- Get each level up the chain\n  SELECT \n    r.referrer_id,\n    r.referred_id,\n    r.level,\n    uc.chain_level + 1,\n    u.first_name,\n    u.last_name,\n    u.email\n  FROM referrals r\n  JOIN upline_chain uc ON r.referred_id = uc.referrer_id\n  JOIN users u ON r.referrer_id = u.id\n  WHERE r.status = 'active' \n    AND uc.chain_level < 10  -- Limit recursion depth\n)\nSELECT \n  referrer_id,\n  chain_level,\n  first_name,\n  last_name,\n  email\nFROM upline_chain \nORDER BY chain_level;",
+        "options": {}
+      },
+      "id": "get-commission-chain",
+      "name": "Get Commission Chain",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1560, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "commission_plans"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "is_active",
+              "condition": "equal",
+              "value": true
+            }
+          ]
+        },
+        "limit": 1,
+        "options": {}
+      },
+      "id": "get-commission-plan",
+      "name": "Get Commission Plan",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [1560, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Calculate commissions for each level in the MLM chain\n// This implements the multi-level commission structure\n\nconst uplineChain = $('get-commission-chain').all();\nconst commissionPlan = $('get-commission-plan').first().json[0];\nconst saleAmount = $('create-sale-record').first().json.final_amount;\nconst saleId = $('create-sale-record').first().json.id;\nconst productData = $('get-product-details').first().json[0];\n\nif (!uplineChain || uplineChain.length === 0) {\n  return { commissions: [], message: 'No upline chain found for this sale' };\n}\n\nconst commissions = [];\nconst maxLevels = commissionPlan.max_levels || 5;\n\n// Define commission rates for each level\nconst levelRates = {\n  1: commissionPlan.direct_referral_rate,\n  2: commissionPlan.level_2_rate,\n  3: commissionPlan.level_3_rate,\n  4: commissionPlan.level_4_rate,\n  5: commissionPlan.level_5_rate\n};\n\nconst levelAmounts = {\n  1: commissionPlan.direct_referral_amount,\n  2: commissionPlan.level_2_amount,\n  3: commissionPlan.level_3_amount,\n  4: commissionPlan.level_4_amount,\n  5: commissionPlan.level_5_amount\n};\n\n// Calculate commission for each person in the upline\nfor (const referrer of uplineChain) {\n  const level = referrer.chain_level;\n  \n  // Skip if beyond max levels\n  if (level > maxLevels) continue;\n  \n  let commissionAmount = 0;\n  let rate = 0;\n  \n  if (commissionPlan.plan_type === 'percentage' || commissionPlan.plan_type === 'hybrid') {\n    // Percentage-based commission\n    rate = levelRates[level] || 0;\n    commissionAmount = (saleAmount * rate) / 100;\n  }\n  \n  if (commissionPlan.plan_type === 'fixed' || commissionPlan.plan_type === 'hybrid') {\n    // Fixed amount commission (add to percentage if hybrid)\n    const fixedAmount = levelAmounts[level] || 0;\n    commissionAmount += fixedAmount;\n  }\n  \n  // Only create commission if amount > 0\n  if (commissionAmount > 0) {\n    commissions.push({\n      user_id: referrer.referrer_id,\n      sale_id: saleId,\n      commission_plan_id: commissionPlan.id,\n      commission_type: 'referral',\n      level: level,\n      rate: rate,\n      base_amount: saleAmount,\n      commission_amount: commissionAmount.toFixed(2),\n      status: 'pending',\n      notes: `Level ${level} commission from sale of ${productData.name}`,\n      referrer_name: `${referrer.first_name} ${referrer.last_name}`,\n      referrer_email: referrer.email\n    });\n  }\n}\n\n// Check for first purchase bonus\nconst firstPurchaseBonus = commissionPlan.first_purchase_bonus || 0;\nlet isFirstPurchase = false;\n\n// We'll check this in the next node, but prepare the data\nreturn {\n  commissions,\n  totalCommissionAmount: commissions.reduce((sum, c) => sum + parseFloat(c.commission_amount), 0),\n  commissionCount: commissions.length,\n  saleId,\n  buyerId: $('create-sale-record').first().json.buyer_id,\n  firstPurchaseBonus,\n  shouldCheckFirstPurchase: firstPurchaseBonus > 0\n};"
+      },
+      "id": "calculate-commissions",
+      "name": "Calculate Commissions",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1780, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-commissions",
+              "leftValue": "={{ $json.commissionCount }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-has-commissions",
+      "name": "Check Has Commissions",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2000, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      },
+      "id": "loop-commissions",
+      "name": "Loop Commissions",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [2220, 200]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "commissions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $json.user_id }}",
+            "sale_id": "={{ $json.sale_id }}",
+            "commission_plan_id": "={{ $json.commission_plan_id }}",
+            "commission_type": "{{ $json.commission_type }}",
+            "level": "={{ $json.level }}",
+            "rate": "={{ $json.rate }}",
+            "base_amount": "={{ $json.base_amount }}",
+            "commission_amount": "={{ $json.commission_amount }}",
+            "status": "{{ $json.status }}",
+            "notes": "{{ $json.notes }}"
+          }
+        },
+        "options": {
+          "queryReplacement": "id,user_id,commission_amount,level,created_at"
+        }
+      },
+      "id": "create-commission-record",
+      "name": "Create Commission Record",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2440, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "notifications"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $json.user_id }}",
+            "title": "New Commission Earned! 💰",
+            "message": "You earned ${{ $json.commission_amount }} commission from a Level {{ $json.level }} referral sale!",
+            "type": "commission",
+            "action_url": "/commissions"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-commission-notification",
+      "name": "Create Commission Notification",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2660, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "commissions@yourmlmcompany.com",
+        "toEmail": "={{ $json.referrer_email }}",
+        "subject": "🎉 You Earned a Commission! ${{ $json.commission_amount }}",
+        "html": "<!DOCTYPE html>\n<html>\n<head>\n    <meta charset=\"utf-8\">\n    <title>Commission Earned!</title>\n</head>\n<body style=\"font-family: Arial, sans-serif; line-height: 1.6; color: #333;\">\n    <div style=\"max-width: 600px; margin: 0 auto; padding: 20px;\">\n        <h2 style=\"color: #27ae60;\">🎉 Commission Earned!</h2>\n        \n        <p>Hi {{ $json.referrer_name }},</p>\n        \n        <p>Great news! You just earned a commission from your MLM network.</p>\n        \n        <div style=\"background: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;\">\n            <h3 style=\"margin-top: 0; color: #27ae60;\">Commission Details:</h3>\n            <p><strong>Amount:</strong> ${{ $json.commission_amount }}</p>\n            <p><strong>Level:</strong> {{ $json.level }}</p>\n            <p><strong>Commission Rate:</strong> {{ $json.rate }}%</p>\n            <p><strong>Product:</strong> {{ $('get-product-details').item.json[0].name }}</p>\n            <p><strong>Sale Amount:</strong> ${{ $json.base_amount }}</p>\n        </div>\n        \n        <p>This commission will be added to your account balance and will be included in your next payout.</p>\n        \n        <div style=\"text-align: center; margin: 30px 0;\">\n            <a href=\"https://yourdomain.com/commissions\" \n               style=\"background: #27ae60; color: white; padding: 12px 30px; text-decoration: none; border-radius: 5px; display: inline-block;\">\n               View All Commissions\n            </a>\n        </div>\n        \n        <p>Keep up the great work building your network!</p>\n        \n        <p>Best regards,<br>\n        The MLM Company Team</p>\n    </div>\n</body>\n</html>",
+        "options": {}
+      },
+      "id": "send-commission-email",
+      "name": "Send Commission Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [2880, 200],
+      "credentials": {
+        "smtp": {
+          "id": "smtp-mlm",
+          "name": "MLM SMTP"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "should-check-first-purchase",
+              "leftValue": "={{ $('calculate-commissions').item.json.shouldCheckFirstPurchase }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "check-first-purchase-bonus",
+      "name": "Check First Purchase Bonus",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2220, 400]
+    },
+    {
+      "parameters": {
+        "operation": "select",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "sales"
+        },
+        "where": {
+          "values": [
+            {
+              "column": "buyer_id",
+              "condition": "equal",
+              "value": "={{ $('calculate-commissions').item.json.buyerId }}"
+            },
+            {
+              "column": "payment_status",
+              "condition": "equal",
+              "value": "completed"
+            }
+          ]
+        },
+        "options": {
+          "includeCount": true
+        }
+      },
+      "id": "check-buyer-purchase-history",
+      "name": "Check Buyer Purchase History",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2440, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "is-first-purchase",
+              "leftValue": "={{ $json.count }}",
+              "rightValue": 1,
+              "operator": {
+                "type": "number",
+                "operation": "equal"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "is-first-purchase",
+      "name": "Is First Purchase?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2660, 400]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Get direct referrer for first purchase bonus\nSELECT \n  r.referrer_id,\n  u.first_name,\n  u.last_name,\n  u.email\nFROM referrals r\nJOIN users u ON r.referrer_id = u.id\nWHERE r.referred_id = '{{ $('calculate-commissions').item.json.buyerId }}' \n  AND r.level = 1 \n  AND r.status = 'active'\nLIMIT 1;",
+        "options": {}
+      },
+      "id": "get-direct-referrer",
+      "name": "Get Direct Referrer",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [2880, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "commissions"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $json[0].referrer_id }}",
+            "sale_id": "={{ $('calculate-commissions').item.json.saleId }}",
+            "commission_plan_id": "={{ $('get-commission-plan').item.json[0].id }}",
+            "commission_type": "first_purchase_bonus",
+            "level": 1,
+            "commission_amount": "={{ $('calculate-commissions').item.json.firstPurchaseBonus }}",
+            "status": "pending",
+            "notes": "First purchase bonus for new customer"
+          }
+        },
+        "options": {}
+      },
+      "id": "create-first-purchase-bonus",
+      "name": "Create First Purchase Bonus",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3100, 400],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Update user statistics for all users in the commission chain\nWITH commission_updates AS (\n  SELECT \n    user_id,\n    SUM(commission_amount) as new_commissions,\n    COUNT(*) as commission_count\n  FROM commissions \n  WHERE sale_id = '{{ $('calculate-commissions').item.json.saleId }}'\n  GROUP BY user_id\n)\nUPDATE user_statistics \nSET \n  total_commissions_earned = total_commissions_earned + cu.new_commissions,\n  commissions_this_month = commissions_this_month + cu.new_commissions,\n  pending_commission_balance = pending_commission_balance + cu.new_commissions,\n  last_calculated = CURRENT_TIMESTAMP\nFROM commission_updates cu\nWHERE user_statistics.user_id = cu.user_id;",
+        "options": {}
+      },
+      "id": "update-user-statistics",
+      "name": "Update User Statistics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3100, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "-- Update referral statistics\nWITH upline_stats AS (\n  SELECT DISTINCT\n    r.referrer_id,\n    COUNT(DISTINCT r.referred_id) FILTER (WHERE r.level = 1) as direct_referrals,\n    COUNT(DISTINCT r.referred_id) FILTER (WHERE r.level > 1) as indirect_referrals\n  FROM referrals r\n  WHERE r.status = 'active'\n  GROUP BY r.referrer_id\n)\nUPDATE user_statistics \nSET \n  total_direct_referrals = COALESCE(us.direct_referrals, 0),\n  total_indirect_referrals = COALESCE(us.indirect_referrals, 0),\n  total_team_size = COALESCE(us.direct_referrals, 0) + COALESCE(us.indirect_referrals, 0),\n  last_calculated = CURRENT_TIMESTAMP\nFROM upline_stats us\nWHERE user_statistics.user_id = us.referrer_id;",
+        "options": {}
+      },
+      "id": "update-referral-statistics",
+      "name": "Update Referral Statistics",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3320, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": {
+          "mode": "define",
+          "value": "public"
+        },
+        "table": {
+          "mode": "define",
+          "value": "activity_logs"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "user_id": "={{ $('create-sale-record').item.json.buyer_id }}",
+            "action": "sale_processed",
+            "resource_type": "sale",
+            "resource_id": "={{ $('create-sale-record').item.json.id }}",
+            "details": "={{ JSON.stringify({ \n  sale_id: $('create-sale-record').item.json.id,\n  product_id: $('create-sale-record').item.json.product_id,\n  amount: $('create-sale-record').item.json.final_amount,\n  commission_count: $('calculate-commissions').item.json.commissionCount,\n  total_commissions: $('calculate-commissions').item.json.totalCommissionAmount\n}) }}"
+          }
+        },
+        "options": {}
+      },
+      "id": "log-sale-activity",
+      "name": "Log Sale Activity",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [3540, 200],
+      "credentials": {
+        "postgres": {
+          "id": "postgres-mlm",
+          "name": "MLM Database"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Sale processed and commissions calculated successfully\",\n  \"data\": {\n    \"sale_id\": \"{{ $('create-sale-record').item.json.id }}\",\n    \"buyer_id\": \"{{ $('create-sale-record').item.json.buyer_id }}\",\n    \"product_id\": \"{{ $('create-sale-record').item.json.product_id }}\",\n    \"sale_amount\": {{ $('create-sale-record').item.json.final_amount }},\n    \"payment_status\": \"{{ $('create-sale-record').item.json.payment_status }}\",\n    \"commissions_created\": {{ $('calculate-commissions').item.json.commissionCount }},\n    \"total_commission_amount\": {{ $('calculate-commissions').item.json.totalCommissionAmount }},\n    \"processed_at\": \"{{ $('create-sale-record').item.json.created_at }}\"\n  }\n}",
+        "options": {}
+      },
+      "id": "success-response",
+      "name": "Success Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [3760, 200]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\n  \"success\": true,\n  \"message\": \"Sale recorded but no commissions processed (payment not completed or product not commission eligible)\",\n  \"data\": {\n    \"sale_id\": \"{{ $('create-sale-record').item.json.id }}\",\n    \"payment_status\": \"{{ $('create-sale-record').item.json.payment_status }}\",\n    \"commission_eligible\": {{ $('get-product-details').item.json[0].commission_eligible }}\n  }\n}",
+        "options": {}
+      },
+      "id": "no-commission-response",
+      "name": "No Commission Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1340, 500]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseCode": 400,
+        "responseBody": "={\n  \"success\": false,\n  \"message\": \"Sale processing failed\",\n  \"error\": \"{{ $json.message || 'Unknown error occurred' }}\"\n}",
+        "options": {}
+      },
+      "id": "error-response",
+      "name": "Error Response",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 500]
+    }
+  ],
+  "connections": {
+    "Sale Processing Webhook": {
+      "main": [
+        [
+          {
+            "node": "Process Sale Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Process Sale Data": {
+      "main": [
+        [
+          {
+            "node": "Get Product Details",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Product Details": {
+      "main": [
+        [
+          {
+            "node": "Check Commission Eligible",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Commission Eligible": {
+      "main": [
+        [
+          {
+            "node": "Create Sale Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Sale Record",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Sale Record": {
+      "main": [
+        [
+          {
+            "node": "Check Payment Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Payment Status": {
+      "main": [
+        [
+          {
+            "node": "Get Commission Chain",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Get Commission Plan",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "No Commission Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Commission Chain": {
+      "main": [
+        [
+          {
+            "node": "Calculate Commissions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Commission Plan": {
+      "main": [
+        [
+          {
+            "node": "Calculate Commissions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Calculate Commissions": {
+      "main": [
+        [
+          {
+            "node": "Check Has Commissions",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Check First Purchase Bonus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check Has Commissions": {
+      "main": [
+        [
+          {
+            "node": "Loop Commissions",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update User Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Loop Commissions": {
+      "main": [
+        [
+          {
+            "node": "Create Commission Record",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Update User Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Commission Record": {
+      "main": [
+        [
+          {
+            "node": "Create Commission Notification",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Commission Notification": {
+      "main": [
+        [
+          {
+            "node": "Send Commission Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Commission Email": {
+      "main": [
+        [
+          {
+            "node": "Loop Commissions",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Check First Purchase Bonus": {
+      "main": [
+        [
+          {
+            "node": "Check Buyer Purchase History",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Check Buyer Purchase History": {
+      "main": [
+        [
+          {
+            "node": "Is First Purchase?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Is First Purchase?": {
+      "main": [
+        [
+          {
+            "node": "Get Direct Referrer",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        []
+      ]
+    },
+    "Get Direct Referrer": {
+      "main": [
+        [
+          {
+            "node": "Create First Purchase Bonus",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update User Statistics": {
+      "main": [
+        [
+          {
+            "node": "Update Referral Statistics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Update Referral Statistics": {
+      "main": [
+        [
+          {
+            "node": "Log Sale Activity",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Log Sale Activity": {
+      "main": [
+        [
+          {
+            "node": "Success Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "id": "mlm-core",
+      "name": "MLM Core"
+    },
+    {
+      "id": "commission-processing",
+      "name": "Commission Processing"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2025-01-05T14:46:17.000Z",
+  "versionId": "1"
+}
